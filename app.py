@@ -291,7 +291,7 @@ def display_analysis():
     display_vessel_kpis_summary(filtered_df)
     
     # Tabs for different analyses
-    tab1, tab2, tab3 = st.tabs(["📅 Yearly Analysis", "🔧 Machinery wise analysis", "📋 Data Export"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📅 Yearly Analysis", "🔧 Machinery wise analysis", "📋 Data Export", "📊 Timeline View"])
     
     with tab1:
         display_yearly_analysis(filtered_df)
@@ -301,6 +301,9 @@ def display_analysis():
     
     with tab3:
         display_export_options(filtered_df)
+    
+    with tab4:
+        display_timeline_chart(filtered_df)
 
 def display_vessel_kpis_summary(df):
     """Display vessel KPIs as a clean summary table with color formatting"""
@@ -742,6 +745,247 @@ def display_export_options(df):
         file_name=f"filtered_data_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
+
+def display_timeline_chart(df):
+    """Display an interactive timeline chart showing job counts by Performing Rank per date with category colors"""
+    if df.empty:
+        st.warning("No data available for timeline visualization.")
+        return
+    
+    st.subheader("📊 Maintenance Timeline View")
+    
+    # Options row
+    col_opt1, col_opt2 = st.columns(2)
+    
+    with col_opt1:
+        group_option = st.radio(
+            "Group Chart By:",
+            ["Rank", "Location"],
+            horizontal=True,
+            key="timeline_group_option"
+        )
+    
+    with col_opt2:
+        time_period = st.radio(
+            "Time Period:",
+            ["Daily", "Monthly", "Quarterly"],
+            horizontal=True,
+            key="timeline_time_period"
+        )
+    
+    # Prepare data for timeline
+    df_timeline = df.copy()
+    df_timeline['Due_Date'] = pd.to_datetime(df_timeline['Calculated Due Date'], errors='coerce')
+    df_timeline = df_timeline[df_timeline['Due_Date'].notna()]
+    
+    if df_timeline.empty:
+        st.warning("No valid due dates found for timeline visualization.")
+        return
+    
+    # Determine category based on:
+    # 1. "C" in the second unnamed column (Unnamed: 1) = Critical
+    # 2. CMS Code present = CMS Item
+    # 3. Otherwise = Normal
+    def get_category(row):
+        # Check for "C" marker in unnamed columns (Critical indicator)
+        unnamed_1 = str(row.get('Unnamed: 1', '')) if 'Unnamed: 1' in row.index else ''
+        
+        # Also check Tags for critical keyword
+        tags = str(row.get('Tags', '')).lower() if pd.notna(row.get('Tags', '')) else ''
+        
+        # Check CMS Code
+        cms_code = str(row.get('CMS Code', '')) if pd.notna(row.get('CMS Code', '')) else ''
+        
+        # Critical: if "C" in unnamed column or 'critical' in tags
+        if unnamed_1 == 'C' or 'critical' in tags:
+            return 'Critical'
+        # CMS Item: if CMS Code is present
+        elif cms_code and cms_code.strip() != '':
+            return 'CMS Item'
+        else:
+            return 'Normal'
+    
+    df_timeline['Category'] = df_timeline.apply(get_category, axis=1)
+    
+    # Determine grouping column
+    if group_option == "Rank":
+        group_col = 'Performing Rank'
+        if group_col not in df_timeline.columns:
+            st.warning("'Performing Rank' column not found in data.")
+            return
+        df_timeline['Group'] = df_timeline[group_col].apply(
+            lambda x: str(x).split(',')[0].strip() if pd.notna(x) else 'Unknown'
+        )
+    else:
+        group_col = 'Machinery Location'
+        if group_col not in df_timeline.columns:
+            st.warning("'Machinery Location' column not found in data.")
+            return
+        df_timeline['Group'] = df_timeline[group_col].apply(
+            lambda x: str(x).split('#')[0].strip() if pd.notna(x) else 'Unknown'
+        )
+        top_locations = df_timeline['Group'].value_counts().head(30).index.tolist()
+        df_timeline = df_timeline[df_timeline['Group'].isin(top_locations)]
+    
+    # Date range filter
+    col1, col2 = st.columns(2)
+    min_date = df_timeline['Due_Date'].min().date()
+    max_date = df_timeline['Due_Date'].max().date()
+    
+    # Set default end date based on time period
+    if time_period == "Daily":
+        default_end = min(max_date, min_date + timedelta(days=21))
+    elif time_period == "Monthly":
+        default_end = min(max_date, min_date + timedelta(days=180))
+    else:
+        default_end = max_date
+    
+    with col1:
+        start_date = st.date_input("Start Date", min_date, min_value=min_date, max_value=max_date, key="timeline_start")
+    with col2:
+        end_date = st.date_input("End Date", default_end, min_value=min_date, max_value=max_date, key="timeline_end")
+    
+    # Filter by date range
+    mask = (df_timeline['Due_Date'].dt.date >= start_date) & (df_timeline['Due_Date'].dt.date <= end_date)
+    df_filtered = df_timeline[mask]
+    
+    if df_filtered.empty:
+        st.warning("No data in selected date range.")
+        return
+    
+    # Create time period grouping
+    df_filtered = df_filtered.copy()
+    if time_period == "Daily":
+        df_filtered['Period'] = df_filtered['Due_Date'].dt.strftime('%d %b')
+        df_filtered['Period_Sort'] = df_filtered['Due_Date'].dt.strftime('%Y-%m-%d')
+    elif time_period == "Monthly":
+        df_filtered['Period'] = df_filtered['Due_Date'].dt.strftime('%b %Y')
+        df_filtered['Period_Sort'] = df_filtered['Due_Date'].dt.strftime('%Y-%m')
+    else:  # Quarterly
+        df_filtered['Quarter'] = df_filtered['Due_Date'].dt.quarter
+        df_filtered['Year'] = df_filtered['Due_Date'].dt.year
+        df_filtered['Period'] = df_filtered.apply(lambda x: f"Q{int(x['Quarter'])} {int(x['Year'])}", axis=1)
+        df_filtered['Period_Sort'] = df_filtered.apply(lambda x: f"{int(x['Year'])}-Q{int(x['Quarter'])}", axis=1)
+    
+    # Aggregate: count jobs by Group, Period, Category
+    agg_df = df_filtered.groupby(['Group', 'Period', 'Period_Sort', 'Category']).size().reset_index(name='Count')
+    
+    # Get unique groups (ALL ranks)
+    groups = sorted(agg_df['Group'].unique())
+    
+    # Get unique periods sorted
+    periods_sorted = agg_df.sort_values('Period_Sort')['Period'].unique().tolist()
+    
+    # Color mapping for categories - Critical on top (first in order for stacking)
+    color_map = {
+        'Critical': '#DC3545',
+        'CMS Item': '#FFC107', 
+        'Normal': '#1E3A8A'
+    }
+    
+    # Create a complete data frame for plotting
+    pivot_data = []
+    for group in groups:
+        for period in periods_sorted:
+            for category in ['Normal', 'CMS Item', 'Critical']:
+                count = agg_df[(agg_df['Group'] == group) & 
+                              (agg_df['Period'] == period) & 
+                              (agg_df['Category'] == category)]['Count'].sum()
+                if count > 0:
+                    pivot_data.append({
+                        'Rank': group,
+                        'Period': period,
+                        'Category': category,
+                        'Count': int(count)
+                    })
+    
+    if not pivot_data:
+        st.warning("No data to display for the selected filters.")
+        return
+    
+    plot_df = pd.DataFrame(pivot_data)
+    
+    # Use plotly express faceted bar chart - vertical bars with facet rows for each rank
+    fig = px.bar(
+        plot_df,
+        x='Period',
+        y='Count',
+        color='Category',
+        facet_row='Rank',
+        color_discrete_map=color_map,
+        text='Count',
+        category_orders={
+            'Category': ['Normal', 'CMS Item', 'Critical'],
+            'Period': periods_sorted,
+            'Rank': groups
+        },
+        barmode='stack'
+    )
+    
+    # Update traces
+    fig.update_traces(
+        textposition='inside',
+        textfont=dict(color='white', size=9, weight='bold'),
+        width=0.7
+    )
+    
+    # Update layout
+    fig.update_layout(
+        height=max(500, len(groups) * 80),
+        showlegend=True,
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1,
+            title='Category'
+        ),
+        margin=dict(l=10, r=140, t=60, b=50),
+        plot_bgcolor='white',
+        bargap=0.2
+    )
+    
+    # Move facet labels (rank names) to the right side
+    fig.for_each_annotation(lambda a: a.update(
+        text=a.text.split("=")[-1],
+        x=1.02,
+        xanchor='left',
+        font=dict(size=11)
+    ))
+    
+    # Remove y-axis titles, gridlines, and align x-axis
+    fig.update_yaxes(
+        title='',
+        showgrid=False,
+        showline=False,
+        zeroline=False,
+        showticklabels=False
+    )
+    
+    fig.update_xaxes(
+        title='',
+        showgrid=False,
+        showline=False,
+        zeroline=False,
+        tickangle=0 if len(periods_sorted) <= 12 else -45,
+        matches='x'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Summary statistics below chart
+    st.markdown("---")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Jobs", len(df_filtered))
+    with col2:
+        st.metric("Critical", len(df_filtered[df_filtered['Category'] == 'Critical']), delta_color="inverse")
+    with col3:
+        st.metric("CMS Items", len(df_filtered[df_filtered['Category'] == 'CMS Item']))
+    with col4:
+        st.metric("Normal", len(df_filtered[df_filtered['Category'] == 'Normal']))
+
 
 def generate_analysis_report(df):
     """Generate a text-based analysis report"""
