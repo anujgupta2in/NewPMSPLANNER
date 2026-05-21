@@ -26,7 +26,7 @@ if 'combined_data' not in st.session_state:
     st.session_state.combined_data = None
 
 def main():
-    st.title("⚙️ PMS PLANNER AND ANALYSIS TOOL")
+    st.title("⚙️ Machinery Maintenance Analysis Tool")
     st.markdown("### Analyze vessel maintenance data by frequency and due dates")
     
     # Sidebar for file upload and filters
@@ -146,11 +146,18 @@ def main():
                 help="Filter for frequency greater than this many months"
             )
             
-            # Date range filter
+            # Date range filter — dynamically populated from the uploaded data
             st.write("**Date Range:**")
+            due_dates_parsed = pd.to_datetime(
+                st.session_state.combined_data['Calculated Due Date'], errors='coerce'
+            )
+            available_years = sorted(
+                due_dates_parsed.dt.year.dropna().astype(int).unique().tolist()
+            )
+            year_options = ["All Years"] + [str(y) for y in available_years]
             date_range = st.selectbox(
                 "Analysis Period",
-                ["All Years", "2024", "2025", "2026", "2027", "2028", "2029"],
+                year_options,
                 index=0
             )
             
@@ -291,7 +298,7 @@ def display_analysis():
     display_vessel_kpis_summary(filtered_df)
     
     # Tabs for different analyses
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 Yearly Analysis", "🔧 Machinery wise analysis", "📋 Data Export", "📊 Timeline View"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Yearly Analysis", "🔧 Machinery wise analysis", "📋 Data Export", "📊 Timeline View", "⏱️ Machinery Running Hours"])
     
     with tab1:
         display_yearly_analysis(filtered_df)
@@ -304,6 +311,9 @@ def display_analysis():
     
     with tab4:
         display_timeline_chart(filtered_df)
+    
+    with tab5:
+        display_running_hours(st.session_state.combined_data, st.session_state.data_processors)
 
 def display_vessel_kpis_summary(df):
     """Display vessel KPIs as a clean summary table with color formatting"""
@@ -987,6 +997,116 @@ def display_timeline_chart(df):
         st.metric("Normal", len(df_filtered[df_filtered['Category'] == 'Normal']))
 
 
+def _extract_date_from_filename(filename):
+    """Extract a date from a filename that contains an 8-digit date in ddmmyyyy format."""
+    import re
+    match = re.search(r'(\d{8})', filename)
+    if match:
+        raw = match.group(1)
+        try:
+            return datetime.strptime(raw, '%d%m%Y').strftime('%d %b %Y')
+        except ValueError:
+            pass
+    return None
+
+
+def display_running_hours(df, data_processors=None):
+    """Display Machinery Running Hours tab — general sub-components, valve locations only."""
+    st.header("⏱️ Machinery Running Hours")
+
+    if df is None or df.empty:
+        st.warning("No data available.")
+        return
+
+    # --- Extract report date from filenames ---
+    report_dates = []
+    if data_processors:
+        for filename in data_processors.keys():
+            d = _extract_date_from_filename(filename)
+            if d:
+                report_dates.append(f"{filename.rsplit('.', 1)[0]}  —  {d}")
+    if report_dates:
+        st.info("📅 **Report Date(s):** " + " | ".join(report_dates))
+
+    # Check required columns
+    if 'Sub Component Location' not in df.columns:
+        st.warning("'Sub Component Location' column not found in the uploaded data.")
+        return
+    if 'Machinery Running Hours' not in df.columns:
+        st.warning("'Machinery Running Hours' column not found in the uploaded data.")
+        return
+
+    # Filter where Sub Component Location contains "general" (case-insensitive)
+    general_df = df[
+        df['Sub Component Location'].astype(str).str.lower().str.contains('general', na=False)
+    ].copy()
+
+    if general_df.empty:
+        st.warning("No rows found where Sub Component Location contains 'general'.")
+        return
+
+    # Ensure Machinery Running Hours is numeric
+    general_df['Machinery Running Hours'] = pd.to_numeric(
+        general_df['Machinery Running Hours'], errors='coerce'
+    )
+
+    # Keep only rows that actually have a running hours value
+    general_df = general_df[general_df['Machinery Running Hours'].notna()]
+
+    if general_df.empty:
+        st.warning("No machinery locations found with running hours data.")
+        return
+
+    # --- Build one row per machinery location: latest (max) running hours only ---
+    group_cols = ['Vessel', 'Machinery Location'] if 'Vessel' in general_df.columns else ['Machinery Location']
+
+    summary = (
+        general_df
+        .groupby(group_cols)['Machinery Running Hours']
+        .max()
+        .reset_index()
+        .rename(columns={'Machinery Running Hours': 'Running Hours'})
+        .sort_values('Running Hours', ascending=False)
+    )
+
+    st.subheader(f"Latest Running Hours — {len(summary)} Machinery Locations")
+    st.dataframe(summary, use_container_width=True, height=min(400, (len(summary) + 1) * 38))
+
+    # --- Bar chart ---
+    chart_data = summary.head(30)
+    color_arg = 'Vessel' if 'Vessel' in chart_data.columns else None
+
+    fig = px.bar(
+        chart_data,
+        x='Machinery Location',
+        y='Running Hours',
+        color=color_arg,
+        title="Latest Machinery Running Hours — Valve Locations",
+        labels={'Running Hours': 'Running Hours', 'Machinery Location': 'Machinery Location'},
+        text='Running Hours'
+    )
+    fig.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+    fig.update_layout(
+        height=500,
+        xaxis_tickangle=-45,
+        plot_bgcolor='white',
+        showlegend=bool(color_arg),
+        margin=dict(t=60, b=120)
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=True, gridcolor='#eeeeee')
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Download ---
+    csv_data = summary.to_csv(index=False)
+    st.download_button(
+        label="📥 Download Running Hours Data (CSV)",
+        data=csv_data,
+        file_name=f"valve_running_hours_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+
 def generate_analysis_report(df):
     """Generate a text-based analysis report"""
     report = f"""
@@ -1023,5 +1143,3 @@ This report was generated by the Machinery Maintenance Analysis Tool.
 
 if __name__ == "__main__":
     main()
-
-
