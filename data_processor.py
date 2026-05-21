@@ -57,7 +57,8 @@ class DataProcessor:
         date_columns = ['Calculated Due Date', 'Last Done Date', 'Completion Date', 'Due Date', 'Next Due']
         for col in date_columns:
             if col in self.df.columns:
-                self.df[col] = pd.to_datetime(self.df[col], dayfirst=True, errors='coerce')
+                parsed = pd.to_datetime(self.df[col], dayfirst=True, errors='coerce')
+                self.df[col] = parsed.dt.date  # date only, no time
     
     def filter_major_machinery(self, min_hours=4000, min_months=30, year_filter=None, vessel_filter=None, machinery_filter=None, job_action_filter=None):
         """Filter data for major machinery based on frequency criteria"""
