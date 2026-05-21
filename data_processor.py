@@ -58,7 +58,9 @@ class DataProcessor:
         for col in date_columns:
             if col in self.df.columns:
                 parsed = pd.to_datetime(self.df[col], dayfirst=True, errors='coerce')
-                self.df[col] = parsed.dt.date  # date only, no time
+                # Store as formatted string so no timestamp ever appears in display or exports
+                date_str = parsed.dt.strftime('%d-%b-%Y')
+                self.df[col] = date_str.where(parsed.notna(), other=None)
     
     def filter_major_machinery(self, min_hours=4000, min_months=30, year_filter=None, vessel_filter=None, machinery_filter=None, job_action_filter=None):
         """Filter data for major machinery based on frequency criteria"""
