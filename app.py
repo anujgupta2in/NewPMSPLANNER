@@ -697,49 +697,161 @@ def prepare_export_data(df):
     
     return export_data
 
+def build_excel_export(df):
+    """Build a formatted Excel workbook matching the UI preview layout."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    # Same columns as the UI preview
+    preview_columns = [
+        'Vessel', 'Job_Details', 'Machinery Location', 'Sub Component Location',
+        'Frequency', 'Calculated Due Date', 'Job Status', 'Department',
+        'Last Done Date', 'Last Done Running Hours', 'Remaining Running Hours', 'Machinery Running Hours'
+    ]
+    available_columns = [col for col in preview_columns if col in df.columns]
+    export_df = df[available_columns].copy().reset_index(drop=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Filtered Maintenance Data"
+
+    # --- Styles ---
+    header_fill   = PatternFill("solid", fgColor="1E3A8A")   # dark blue (matches UI)
+    header_font   = Font(color="FFFFFF", bold=True, size=11)
+    header_align  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    even_fill = PatternFill("solid", fgColor="EBF0FA")       # light blue stripe
+    odd_fill  = PatternFill("solid", fgColor="FFFFFF")
+
+    pending_fill  = PatternFill("solid", fgColor="FFF2CC")   # yellow for Pending
+    overdue_fill  = PatternFill("solid", fgColor="FFD7D7")   # red for overdue
+
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    thin_border = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+
+    today = datetime.now().date()
+
+    # --- Header row ---
+    # Friendly display names
+    col_labels = {
+        'Job_Details': 'Job Details',
+        'Sub Component Location': 'Sub Component Location',
+        'Calculated Due Date': 'Calculated Due Date',
+        'Last Done Running Hours': 'Last Done R/H',
+        'Remaining Running Hours': 'Remaining R/H',
+        'Machinery Running Hours': 'Machinery R/H',
+    }
+    headers = [col_labels.get(c, c) for c in available_columns]
+
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.fill    = header_fill
+        cell.font    = header_font
+        cell.alignment = header_align
+        cell.border  = thin_border
+
+    ws.row_dimensions[1].height = 30
+
+    # --- Data rows ---
+    for row_idx, (_, row) in enumerate(export_df.iterrows(), start=2):
+        is_even = (row_idx % 2 == 0)
+        row_fill = even_fill if is_even else odd_fill
+
+        # Determine if row is overdue
+        job_status = str(row.get('Job Status', ''))
+        due_date_raw = row.get('Calculated Due Date', None)
+        is_overdue = False
+        if due_date_raw and str(due_date_raw) not in ('', 'nan', 'None', 'NaT'):
+            try:
+                due_dt = pd.to_datetime(due_date_raw, errors='coerce')
+                if pd.notna(due_dt) and due_dt.date() < today:
+                    is_overdue = True
+            except Exception:
+                pass
+
+        for col_idx, col_name in enumerate(available_columns, start=1):
+            value = row[col_name]
+            # Clean NaN/None for display
+            if pd.isna(value) if not isinstance(value, str) else (value in ('nan', 'None', 'NaT')):
+                value = ''
+
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = thin_border
+
+            # Row background: overdue > pending > stripe
+            if is_overdue and col_name == 'Calculated Due Date':
+                cell.fill = overdue_fill
+            elif job_status == 'Pending' and col_name == 'Job Status':
+                cell.fill = pending_fill
+            else:
+                cell.fill = row_fill
+
+            # Alignment
+            if col_name in ('Last Done Running Hours', 'Remaining Running Hours',
+                            'Machinery Running Hours'):
+                cell.alignment = center_align
+            else:
+                cell.alignment = left_align
+
+    # --- Column widths ---
+    col_widths = {
+        'Vessel': 18, 'Job_Details': 45, 'Machinery Location': 30,
+        'Sub Component Location': 40, 'Frequency': 15,
+        'Calculated Due Date': 18, 'Job Status': 14, 'Department': 14,
+        'Last Done Date': 16, 'Last Done Running Hours': 16,
+        'Remaining Running Hours': 16, 'Machinery Running Hours': 16,
+    }
+    for col_idx, col_name in enumerate(available_columns, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, 18)
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    # --- Auto-filter ---
+    ws.auto_filter.ref = ws.dimensions
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def display_export_options(df):
     """Display data export options"""
     st.header("📋 Data Export")
-    
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.subheader("Export Filtered Data")
-        
-        # Prepare export data with specified columns and order
-        export_df = prepare_export_data(df)
-        
-        # CSV export
-        csv_buffer = io.StringIO()
-        export_df.to_csv(csv_buffer, index=False)
-        csv_data = csv_buffer.getvalue()
-        
+        excel_data = build_excel_export(df)
         st.download_button(
-            label="📥 Download Filtered Data (CSV)",
-            data=csv_data,
-            file_name=f"major_machinery_maintenance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
+            label="📥 Download Filtered Data (Excel)",
+            data=excel_data,
+            file_name=f"major_machinery_maintenance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        
-    
+
     with col2:
         st.subheader("Analysis Report")
-        
-        # Generate analysis report
         report = generate_analysis_report(df)
-        
         st.download_button(
             label="📊 Download Analysis Report (TXT)",
             data=report,
             file_name=f"maintenance_analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             mime="text/plain"
         )
-        
 
-    # Data Preview Section (full width)
+    # Data Preview Section (full width) — same columns as the Excel export
     st.subheader("📋 Data Preview")
-    
-    # Show complete filtered data with key columns including Sub component
     preview_columns = [
         'Vessel', 'Job_Details', 'Machinery Location', 'Sub Component Location',
         'Frequency', 'Calculated Due Date', 'Job Status', 'Department',
@@ -747,18 +859,9 @@ def display_export_options(df):
     ]
     available_columns = [col for col in preview_columns if col in df.columns]
     preview_df = df[available_columns]
-    
+
     st.write(f"**Complete Filtered Data:** {len(preview_df)} records")
     st.dataframe(preview_df, use_container_width=True, height=400)
-    
-    # Download option for complete preview data
-    preview_csv = preview_df.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Complete Preview Data (CSV)",
-        data=preview_csv,
-        file_name=f"filtered_data_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv"
-    )
 
 def display_timeline_chart(df):
     """Display an interactive timeline chart showing job counts by Performing Rank per date with category colors"""
